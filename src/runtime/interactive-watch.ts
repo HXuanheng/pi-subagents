@@ -247,6 +247,7 @@ async function watchInteractiveGeneration(
 
 	try {
 		traceSubagentLaunch("interactive.watch.start", {
+			id: running.id,
 			name,
 			surface,
 			sessionFile,
@@ -263,6 +264,7 @@ async function watchInteractiveGeneration(
 					});
 
 		traceSubagentLaunch("interactive.watch.pollResult", {
+			id: running.id,
 			name,
 			surface,
 			sessionFile,
@@ -288,6 +290,20 @@ async function watchInteractiveGeneration(
 		const errorMessage = pollResult.reason === "error" ? pollResult.errorMessage : undefined;
 		const finalContextUsage = resolveFinalContextUsage(running, pickFinalUsageSource(pollResult, exitSignal));
 		const timeoutFields = recordTimeoutOutcome(running, pollResult);
+		// The one terminal event carrying the resolved outcome. watch.pollResult alone
+		// cannot express it: a timeout that closes its pane cleanly emits no other
+		// distinguishing record, so a consumer reading only the earlier events counts
+		// every successful timeout as a normal completion.
+		traceSubagentLaunch("interactive.watch.finished", {
+			id: running.id,
+			name,
+			surface,
+			sessionFile,
+			elapsed,
+			outcome: timeoutFields.timedOut ?? (pollResult.reason === "ping" ? "ping" : "completed"),
+			...(timeoutFields.timedOutAfter !== undefined ? { timedOutAfter: timeoutFields.timedOutAfter } : {}),
+			exitCode: timeoutFields.timedOut ? pollResult.exitCode || 1 : pollResult.exitCode,
+		});
 		cleanupDoneSentinel(running);
 		try {
 			await runtime.closeRunningSurface(running);
@@ -315,11 +331,20 @@ async function watchInteractiveGeneration(
 	} catch (err: unknown) {
 		const errorMessage = err instanceof Error ? err.message : String(err);
 		traceSubagentLaunch("interactive.watch.error", {
+			id: running.id,
 			name,
 			surface,
 			sessionFile,
 			errorMessage,
 			signalAborted: signal.aborted,
+		});
+		traceSubagentLaunch("interactive.watch.finished", {
+			id: running.id,
+			name,
+			surface,
+			sessionFile,
+			outcome: signal.aborted ? "aborted" : "error",
+			errorMessage,
 		});
 		cleanupDoneSentinel(running);
 		try {

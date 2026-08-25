@@ -853,6 +853,45 @@ Live test knobs:
 - `PI_SUBAGENT_LIVE_LOCK_PATH`
 - `PI_SUBAGENT_PROVIDER_RECOVERY_DELAYS_MS` — override the provider-error recovery backoff windows (comma-separated ms, e.g. `10000,11000,12000`) so a live Pi process can exercise the wait → nudge → kill path without waiting the full 30/60/90s. Values below 10000ms are clamped so recovery does not race Pi's own default auto-retry backoff. Defaults to the production `30000,60000,90000`.
 
+## Trace log
+
+Set `PI_SUBAGENT_TRACE_LOG` to a file path and Pi appends one JSON object per line for each
+launch-lifecycle event: preparation, surface creation, the command it typed, watch start, and the
+run's terminal outcome. Tracing is off unless the variable is set, and it is best-effort — a failed
+write never breaks a launch.
+
+```bash
+PI_SUBAGENT_TRACE_LOG=~/.pi/agent/subagent-trace.jsonl pi
+```
+
+Read the accumulated log with:
+
+```bash
+node scripts/trace-report.mjs ~/.pi/agent/subagent-trace.jsonl
+```
+
+The path argument is optional; without it the command reads `PI_SUBAGENT_TRACE_LOG`. The report is a
+per-agent table of launches, resumes, completions, timeouts, idle-timeouts, pings, aborts, errors and
+duration min/median/max, followed by pane-close failures, session-mode distribution, unattributed
+events and the notes describing how each number was derived.
+
+What the numbers mean matters more than the table:
+
+- A run's outcome comes from its `interactive.watch.finished` event and nothing else. A timeout that
+  closes its pane cleanly emits no other distinguishing record, so a report built from the earlier
+  events would file every successful timeout as a normal completion.
+- `interactive.timeout.closeFailed` means a pane could not be closed. It also fires for soft wrap-up
+  closes, so it is reported separately as a close failure and never counted as a timeout.
+- Duration is measured from a run's first event to its finished event. A run that never finished —
+  still going, or hung — is counted as `incomplete` and contributes no duration. No number is
+  invented for it.
+- Every per-run event carries the launch id, so a reused pane cannot merge two runs.
+- A truncated final line, which is normal if the log is read while Pi is writing, is skipped and
+  counted under `malformed lines skipped`.
+
+Logs written by an older build have no finished event and no id on watch events. Their runs appear as
+`incomplete` rather than being guessed at.
+
 ## Herdr placement
 
 Herdr uses `auto` placement by default. The first child shares the parent tab when both panes remain usable. Later children split the largest pane owned by that parent. Herdr chooses right or down from the pane geometry and opens a dedicated child tab when no safe split remains.
