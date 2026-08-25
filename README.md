@@ -837,6 +837,16 @@ The wrapper applies to new children and resumed children. Quoted paths work:
 PI_SUBAGENT_PI_COMMAND="'/path with spaces/my-wrapper' pi" pi
 ```
 
+The value is split on whitespace with shell-style quoting. A backslash escapes only `"`, `'`, `\` and
+a space; before anything else it stays a literal backslash, so a Windows path needs no doubling:
+
+```bash
+PI_SUBAGENT_PI_COMMAND='C:\Users\me\AppData\Local\pi\pi.exe'
+PI_SUBAGENT_PI_COMMAND='"C:\Program Files\pi\pi.exe" --verbose'
+```
+
+Quote the path if it contains spaces — quoting is what groups a word, and backslashes do not.
+
 ## Environment variables
 
 User-facing knobs:

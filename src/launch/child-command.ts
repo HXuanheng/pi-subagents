@@ -7,25 +7,36 @@ export interface PiInvocation {
 	args: string[];
 }
 
+// A backslash only escapes the characters that need escaping here. Anything else
+// keeps its backslash, because on Windows a backslash is a path separator, not an
+// escape: consuming it turned `C:\Users\me\pi.exe` into `C:Usersmepi.exe`, which
+// the child shell then reported as `command not found`.
+const ESCAPABLE = new Set(['"', "'", "\\", " "]);
+
 /**
  * Split a command override into argv parts. This intentionally supports only
  * shell-style quoting/escaping, not expansion or operators, because the result
  * is also used with spawn() for background subagents.
+ *
+ * `\"`, `\'`, `\\` and `\ ` escape the following character. A backslash before
+ * anything else is literal, so a Windows path survives unquoted.
  */
 export function parseCommandWords(command: string): string[] {
 	const words: string[] = [];
 	let current = "";
 	let quote: "'" | '"' | null = null;
-	let escaping = false;
 
-	for (const char of command.trim()) {
-		if (escaping) {
-			current += char;
-			escaping = false;
-			continue;
-		}
+	const chars = Array.from(command.trim());
+	for (let i = 0; i < chars.length; i++) {
+		const char = chars[i];
 		if (char === "\\" && quote !== "'") {
-			escaping = true;
+			const next = chars[i + 1];
+			if (next !== undefined && ESCAPABLE.has(next)) {
+				current += next;
+				i++;
+				continue;
+			}
+			current += "\\";
 			continue;
 		}
 		if ((char === "'" || char === '"') && quote === null) {
@@ -46,7 +57,6 @@ export function parseCommandWords(command: string): string[] {
 		current += char;
 	}
 
-	if (escaping) current += "\\";
 	if (quote !== null) throw new Error("PI_SUBAGENT_PI_COMMAND has an unterminated quote");
 	if (current) words.push(current);
 	return words;

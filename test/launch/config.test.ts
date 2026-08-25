@@ -467,6 +467,51 @@ describe("agent launch configuration", () => {
 		});
 	});
 
+	// A consumed backslash produced `C:Usersmepi.exe`, which the child pane reported
+	// as `command not found` while the parent waited on a sentinel that never arrived.
+	it("keeps backslashes in an unquoted Windows path in PI_SUBAGENT_PI_COMMAND", () => {
+		process.env.PI_SUBAGENT_PI_COMMAND = "C:\\Users\\me\\AppData\\Local\\pi\\pi.exe";
+		assert.deepEqual(getPiInvocationForTest(["--session", "/tmp/session.jsonl"]), {
+			command: "C:\\Users\\me\\AppData\\Local\\pi\\pi.exe",
+			args: ["--session", "/tmp/session.jsonl"],
+		});
+	});
+
+	it("keeps backslashes in a double-quoted Windows path with spaces", () => {
+		process.env.PI_SUBAGENT_PI_COMMAND = '"C:\\Program Files\\pi\\pi.exe" --verbose';
+		assert.deepEqual(getPiInvocationForTest(["--session", "/tmp/session.jsonl"]), {
+			command: "C:\\Program Files\\pi\\pi.exe",
+			args: ["--verbose", "--session", "/tmp/session.jsonl"],
+		});
+	});
+
+	it("shell-escapes a Windows path so the staged script runs it as one word", () => {
+		process.env.PI_SUBAGENT_PI_COMMAND = "C:\\Program Files\\pi\\pi.exe";
+		// Unquoted, the space still splits: quoting is the user's job, backslashes are not.
+		assert.deepEqual(getPiShellPartsForTest([]), ["'C:\\Program'", "'Files\\pi\\pi.exe'"]);
+		process.env.PI_SUBAGENT_PI_COMMAND = '"C:\\Program Files\\pi\\pi.exe"';
+		assert.deepEqual(getPiShellPartsForTest([]), ["'C:\\Program Files\\pi\\pi.exe'"]);
+	});
+
+	it("still lets a backslash escape a quote, a space and itself", () => {
+		process.env.PI_SUBAGENT_PI_COMMAND = "/opt/wrapper\\ bin/pi pi";
+		assert.deepEqual(getPiInvocationForTest([]), {
+			command: "/opt/wrapper bin/pi",
+			args: ["pi"],
+		});
+
+		process.env.PI_SUBAGENT_PI_COMMAND = '/opt/say\\"hi\\" pi';
+		assert.deepEqual(getPiInvocationForTest([]), { command: '/opt/say"hi"', args: ["pi"] });
+
+		process.env.PI_SUBAGENT_PI_COMMAND = "C:\\\\server\\\\share\\\\pi.exe";
+		assert.deepEqual(getPiInvocationForTest([]), { command: "C:\\server\\share\\pi.exe", args: [] });
+	});
+
+	it("keeps a trailing backslash instead of dropping it", () => {
+		process.env.PI_SUBAGENT_PI_COMMAND = "C:\\tools\\pi.exe\\";
+		assert.deepEqual(getPiInvocationForTest([]), { command: "C:\\tools\\pi.exe\\", args: [] });
+	});
+
 	it("preserves child process environment while applying launch vars", () => {
 		process.env.PI_PACKAGE_DIR = "/tmp/pi-package";
 		process.env.PI_CODING_AGENT_DIR = "/tmp/pi-agent";
