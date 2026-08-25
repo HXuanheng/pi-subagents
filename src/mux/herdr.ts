@@ -69,6 +69,31 @@ type HerdrExecError = Error & {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * How the herdr CLI is invoked. Overridable so tests can stand in for the real
+ * binary: a fake on PATH cannot work everywhere, because Windows runs only
+ * .exe/.com through CreateProcess and Node refuses .cmd/.bat without a shell,
+ * so a POSIX shebang script on PATH fails with ENOENT before any launch logic
+ * is reached. Production behaviour is unchanged — the default runner is the same
+ * spawnSync/execFile pair it always was.
+ */
+export interface HerdrCommandRunner {
+	runSync(args: string[]): HerdrProcessResult;
+	runAsync(args: string[], options: { encoding: "utf8"; maxBuffer?: number }): Promise<{ stdout: string }>;
+}
+
+const defaultHerdrCommandRunner: HerdrCommandRunner = {
+	runSync: (args) => spawnSync("herdr", args, { encoding: "utf8" }),
+	runAsync: (args, options) => execFileAsync("herdr", args, options),
+};
+
+let herdrCommandRunner: HerdrCommandRunner = defaultHerdrCommandRunner;
+
+/** Replace the herdr CLI runner. Pass null to restore the real binary. */
+export function setHerdrCommandRunner(runner: HerdrCommandRunner | null): void {
+	herdrCommandRunner = runner ?? defaultHerdrCommandRunner;
+}
+
 class HerdrCommandError extends Error {
 	readonly operation: string;
 	readonly code?: string;
@@ -148,7 +173,7 @@ function formatHerdrApiError(operation: string, error: unknown, fallback: string
 }
 
 function runHerdrJson(operation: string, args: string[]): unknown {
-	const result = spawnSync("herdr", args, { encoding: "utf8" });
+	const result = herdrCommandRunner.runSync(args);
 	if (result.error) {
 		throw new Error(`Herdr ${operation} failed to start: ${result.error.message}`);
 	}
@@ -192,7 +217,7 @@ function runHerdrApi(operation: string, args: string[]): Record<string, unknown>
 }
 
 function runHerdrText(operation: string, args: string[]): string {
-	const result = spawnSync("herdr", args, { encoding: "utf8" });
+	const result = herdrCommandRunner.runSync(args);
 	if (result.error) {
 		throw new Error(`Herdr ${operation} failed to start: ${result.error.message}`);
 	}
@@ -205,7 +230,7 @@ function runHerdrText(operation: string, args: string[]): string {
 function runHerdrVoid(operation: string, args: string[]): void {
 	// Herdr void commands such as pane run/send report success with exit code 0 and empty stdout.
 	// Structured JSON output is optional here and exists only on failures or future CLI variants.
-	const result = spawnSync("herdr", args, { encoding: "utf8" });
+	const result = herdrCommandRunner.runSync(args);
 	if (result.error) {
 		throw new Error(`Herdr ${operation} failed to start: ${result.error.message}`);
 	}
@@ -233,7 +258,7 @@ function runHerdrVoid(operation: string, args: string[]): void {
 
 async function runHerdrTextAsync(operation: string, args: string[]): Promise<string> {
 	try {
-		const { stdout } = await execFileAsync("herdr", args, {
+		const { stdout } = await herdrCommandRunner.runAsync(args, {
 			encoding: "utf8",
 		});
 		return outputText(stdout);
@@ -530,7 +555,13 @@ export function renameHerdrWorkspace(workspaceId: string, title: string): void {
 export function isHerdrRuntimeAvailable(
 	hasCommand: (command: string) => boolean = (command) => defaultMuxRuntimeProbe.hasCommand(command),
 ): boolean {
+	// An installed runner replaces the CLI outright, so PATH says nothing about it.
+	if (herdrCommandRunner !== defaultHerdrCommandRunner) return probeHerdrRuntime();
 	if (!hasCommand("herdr")) return false;
+	return probeHerdrRuntime();
+}
+
+function probeHerdrRuntime(): boolean {
 	try {
 		const status = getHerdrServerStatus();
 		if (!status.running || !status.compatible) return false;

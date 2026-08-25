@@ -1,5 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
-import { realpathSync, rmSync } from "node:fs";
+import { appendFileSync, realpathSync, rmSync } from "node:fs";
+import { delimiter } from "node:path";
+import { setHerdrCommandRunner } from "../../src/mux/herdr.ts";
+import { resolveWindowsPosixInterpreter } from "../../src/mux/staged-shell.ts";
 import { launchBackgroundSubagent } from "../../src/launch/background.ts";
 import { launchInteractiveSubagent } from "../../src/launch/interactive.ts";
 import {
@@ -7,6 +10,7 @@ import {
 	assert,
 	createSessionFile,
 	createTestDir,
+	afterEach,
 	describe,
 	enforceAgentFrontmatterForTest,
 	existsSync,
@@ -23,6 +27,23 @@ import {
 	writeExecutable,
 	writeFileSync,
 } from "../support/index.ts";
+
+// Every test in this file installs the fake runner; none of them wants the real
+// binary left in place for whatever runs next.
+afterEach(() => setHerdrCommandRunner(null));
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// The staged script is POSIX, and so are the fake binaries it runs. Windows has no
+// /bin/sh, so use the same interpreter production resolves for a PowerShell pane.
+function posixShellPath(): string {
+	if (process.platform !== "win32") return "/bin/sh";
+	const bash = resolveWindowsPosixInterpreter();
+	if (!bash) throw new Error("No POSIX interpreter found; set PI_SUBAGENT_WIN_BASH to run this test");
+	return bash;
+}
 
 function clearMuxRuntimeEnv(): void {
 	delete process.env.CMUX_SOCKET_PATH;
@@ -46,87 +67,91 @@ function clearMuxRuntimeEnv(): void {
 	delete process.env.PI_SUBAGENT_SURFACE;
 }
 
-function writeFakeHerdr(dir: string): string {
-	const logFile = join(dir, "herdr.log");
+// Canned herdr CLI responses, keyed by the leading argument words. Previously this
+// was a #!/bin/sh script dropped on PATH, which cannot run on Windows: CreateProcess
+// executes only .exe/.com and Node refuses .cmd/.bat without a shell, so spawnSync
+// failed with ENOENT and every test here died at mux detection. The runner seam
+// replaces the binary directly instead, so the same fake works on every platform.
+const FAKE_HERDR_RESPONSES: { match: string[]; stdout?: string }[] = [
+	{
+		match: ["status", "server", "--json"],
+		stdout: '{"status":"running","running":true,"compatible":true,"protocol":17,"version":"0.7.5"}',
+	},
+	{
+		match: ["pane", "current", "--current"],
+		stdout:
+			'{"id":"cli:pane:current","result":{"type":"pane_current","pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","cwd":"/parent","foreground_cwd":"/parent","focused":true}}}',
+	},
+	{
+		match: ["pane", "layout"],
+		stdout:
+			'{"id":"cli:pane:layout","result":{"type":"pane_layout","layout":{"area":{"height":52,"width":120,"x":0,"y":0},"focused_pane_id":"w1:p1","panes":[{"focused":true,"pane_id":"w1:p1","rect":{"height":52,"width":120,"x":0,"y":0}}],"splits":[],"tab_id":"w1:t1","workspace_id":"w1","zoomed":false}}}',
+	},
+	{
+		match: ["pane", "split"],
+		stdout:
+			'{"id":"cli:pane:split","result":{"type":"pane_split","pane":{"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1","cwd":"/child","focused":false}}}',
+	},
+	{ match: ["pane", "rename"], stdout: '{"id":"cli:pane:rename","result":{"type":"pane_renamed"}}' },
+	{ match: ["pane", "close"], stdout: '{"id":"cli:pane:close","result":{"type":"pane_closed"}}' },
+	{
+		match: ["tab", "create"],
+		stdout:
+			'{"id":"cli:tab:create","result":{"type":"tab_created","tab":{"tab_id":"w1:t2","workspace_id":"w1","label":"Child","focused":false,"pane_count":1},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","cwd":"/child","focused":false}}}',
+	},
+	{
+		match: ["tab", "list"],
+		stdout:
+			'{"id":"cli:tab:list","result":{"type":"tab_list","tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"Parent","focused":true,"pane_count":1},{"tab_id":"w1:t2","workspace_id":"w1","label":"Child","focused":false,"pane_count":1}]}}',
+	},
+	{ match: ["tab", "rename"], stdout: '{"id":"cli:tab:rename","result":{"type":"tab_renamed"}}' },
+	{ match: ["tab", "close"], stdout: '{"id":"cli:tab:close","result":{"type":"tab_closed"}}' },
+	{ match: ["pane", "run"] },
+	{ match: ["pane", "send-text"] },
+	{ match: ["pane", "send-keys"] },
+];
+
+const UNKNOWN_FAKE_HERDR_COMMAND = '{"error":{"code":"unknown_command","message":"unsupported fake herdr command"}}';
+
+function fakeHerdrResponse(args: string[]): { stdout: string; status: number } {
+	for (const candidate of FAKE_HERDR_RESPONSES) {
+		if (candidate.match.every((word, index) => args[index] === word)) {
+			return { stdout: candidate.stdout ? `${candidate.stdout}\n` : "", status: 0 };
+		}
+	}
+	return { stdout: `${UNKNOWN_FAKE_HERDR_COMMAND}\n`, status: 1 };
+}
+
+// The log keeps the old shape - one space-joined argv line per invocation - so the
+// existing assertions against it are unchanged.
+function installFakeHerdr(logFile: string): void {
 	writeFileSync(logFile, "");
-	writeExecutable(
-		dir,
-		"herdr",
-		`#!/bin/sh
-printf '%s\n' "$*" >> "${logFile}"
-
-if [ "$*" = "status server --json" ]; then
-  printf '%s\n' '{"status":"running","running":true,"compatible":true,"protocol":17,"version":"0.7.5"}'
-  exit 0
-fi
-
-if [ "$*" = "pane current --current" ]; then
-  printf '%s\n' '{"id":"cli:pane:current","result":{"type":"pane_current","pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1","cwd":"/parent","foreground_cwd":"/parent","focused":true}}}'
-  exit 0
-fi
-
-if [ "$1" = "pane" ] && [ "$2" = "layout" ]; then
-  printf '%s\n' '{"id":"cli:pane:layout","result":{"type":"pane_layout","layout":{"area":{"height":52,"width":120,"x":0,"y":0},"focused_pane_id":"w1:p1","panes":[{"focused":true,"pane_id":"w1:p1","rect":{"height":52,"width":120,"x":0,"y":0}}],"splits":[],"tab_id":"w1:t1","workspace_id":"w1","zoomed":false}}}'
-  exit 0
-fi
-
-if [ "$1" = "pane" ] && [ "$2" = "split" ]; then
-  printf '%s\n' '{"id":"cli:pane:split","result":{"type":"pane_split","pane":{"pane_id":"w1:p2","tab_id":"w1:t1","workspace_id":"w1","cwd":"/child","focused":false}}}'
-  exit 0
-fi
-
-if [ "$1" = "pane" ] && [ "$2" = "rename" ]; then
-  printf '%s\n' '{"id":"cli:pane:rename","result":{"type":"pane_renamed"}}'
-  exit 0
-fi
-
-if [ "$1" = "pane" ] && [ "$2" = "close" ]; then
-  printf '%s\n' '{"id":"cli:pane:close","result":{"type":"pane_closed"}}'
-  exit 0
-fi
-
-if [ "$1" = "tab" ] && [ "$2" = "create" ]; then
-  printf '%s\n' '{"id":"cli:tab:create","result":{"type":"tab_created","tab":{"tab_id":"w1:t2","workspace_id":"w1","label":"Child","focused":false,"pane_count":1},"root_pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1","cwd":"/child","focused":false}}}'
-  exit 0
-fi
-
-if [ "$1" = "tab" ] && [ "$2" = "list" ]; then
-  printf '%s\n' '{"id":"cli:tab:list","result":{"type":"tab_list","tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"Parent","focused":true,"pane_count":1},{"tab_id":"w1:t2","workspace_id":"w1","label":"Child","focused":false,"pane_count":1}]}}'
-  exit 0
-fi
-
-if [ "$1" = "tab" ] && [ "$2" = "rename" ]; then
-  printf '%s\n' '{"id":"cli:tab:rename","result":{"type":"tab_renamed"}}'
-  exit 0
-fi
-
-if [ "$1" = "tab" ] && [ "$2" = "close" ]; then
-  printf '%s\n' '{"id":"cli:tab:close","result":{"type":"tab_closed"}}'
-  exit 0
-fi
-
-if [ "$1" = "pane" ] && [ "$2" = "run" ]; then
-  exit 0
-fi
-
-if [ "$1" = "pane" ] && [ "$2" = "send-text" ]; then
-  exit 0
-fi
-
-if [ "$1" = "pane" ] && [ "$2" = "send-keys" ]; then
-  exit 0
-fi
-
-printf '%s\n' '{"error":{"code":"unknown_command","message":"unsupported fake herdr command"}}'
-exit 1
-`,
-	);
-	return logFile;
+	const record = (args: string[]) => appendFileSync(logFile, `${args.join(" ")}\n`);
+	setHerdrCommandRunner({
+		runSync: (args) => {
+			record(args);
+			const { stdout, status } = fakeHerdrResponse(args);
+			return { status, stdout, stderr: "", pid: 0, output: [null, stdout, ""], signal: null } as ReturnType<typeof spawnSync>;
+		},
+		runAsync: async (args) => {
+			record(args);
+			const { stdout, status } = fakeHerdrResponse(args);
+			if (status !== 0) {
+				const error = new Error(`fake herdr exited with ${status}`) as Error & { code?: number; stdout?: string; stderr?: string };
+				error.code = status;
+				error.stdout = stdout;
+				error.stderr = "";
+				throw error;
+			}
+			return { stdout };
+		},
+	});
 }
 
 function useFakeHerdr(): { dir: string; logFile: string } {
 	const dir = createTestDir();
-	const logFile = writeFakeHerdr(dir);
+	const logFile = join(dir, "herdr.log");
+	installFakeHerdr(logFile);
 	clearMuxRuntimeEnv();
 	process.env.PATH = dir;
 	return { dir, logFile };
@@ -157,8 +182,12 @@ function extractTaskArtifactPath(commandText: string): string {
 	return match[1];
 }
 
+// The staged line differs per pane shell: POSIX types the script path directly,
+// while a PowerShell pane gets `& '<bash>' '<script>'`. Both quote the staged
+// script, and only the script ends in .sh, so match on that rather than on
+// position.
 function extractHerdrRunScriptPath(log: string): string {
-	const match = log.match(/pane run w1:p2 '([^']+)'/);
+	const match = log.match(/pane run w1:p2 .*?'([^']+\.sh)'/);
 	if (!match?.[1]) throw new Error("Expected Herdr launch command to run a staged shell script");
 	return match[1];
 }
@@ -173,7 +202,7 @@ describe("Herdr interactive launch parity", () => {
 		const { dir, logFile } = useFakeHerdr();
 		const originalPiCommand = process.env.PI_SUBAGENT_PI_COMMAND;
 		const originalShell = process.env.SHELL;
-		process.env.PATH = `${dir}:${originalPath ?? ""}`;
+		process.env.PATH = `${dir}${delimiter}${originalPath ?? ""}`;
 		process.env.SHELL = "/bin/sh";
 		try {
 			const cwd = createTestDir();
@@ -215,7 +244,7 @@ describe("Herdr interactive launch parity", () => {
 			const launchScript = readFileSync(launchScriptPath, "utf8");
 			const command = launchScript.split("\n").slice(1).join("\n").trim();
 
-			const shell = spawn("/bin/sh", [], {
+			const shell = spawn(posixShellPath(), [], {
 				stdio: ["pipe", "ignore", "ignore"],
 			});
 			try {
@@ -227,7 +256,7 @@ describe("Herdr interactive launch parity", () => {
 			}
 
 			rmSync(running.doneSentinelFile!, { force: true });
-			const result = spawnSync(launchScriptPath, { encoding: "utf8" });
+			const result = spawnSync(posixShellPath(), [launchScriptPath], { encoding: "utf8" });
 			assert.equal(result.error, undefined);
 			assert.match(readFileSync(running.doneSentinelFile!, "utf8"), /__SUBAGENT_DONE_42__/);
 		} finally {
@@ -310,8 +339,10 @@ describe("Herdr interactive launch parity", () => {
 		assert.match(log, /pane run w1:p2 /);
 		assert.doesNotMatch(log, /pane send-keys w1:p2 Enter/);
 		const launchScript = readHerdrRunScript(log);
-		assert.match(launchScript, new RegExp(`cd '${childCwd.replace(/'/g, "'\\''")}' &&`));
-		assert.match(launchScript, new RegExp(`'--session' '${running.sessionFile.replace(/'/g, "'\\''")}'`));
+		// escapeRegExp, not just the shell quote: a Windows cwd is full of backslashes,
+		// and unescaped they turn the path into regex escape sequences that match nothing.
+		assert.match(launchScript, new RegExp(`cd '${escapeRegExp(childCwd.replace(/'/g, "'\\''"))}' &&`));
+		assert.match(launchScript, new RegExp(`'--session' '${escapeRegExp(running.sessionFile.replace(/'/g, "'\\''"))}'`));
 		assert.match(launchScript, /'--no-session'/);
 		assert.match(launchScript, /'--approve'/);
 		assert.match(launchScript, /CUSTOM_ENV='from-agent'/);
@@ -548,13 +579,13 @@ describe("Herdr interactive launch parity", () => {
 		assert.match(launchScript, /--model 'zai-messages\/glm-5-turbo:off'/);
 		assert.match(launchScript, /--no-context-files/);
 		assert.match(launchScript, /--append-system-prompt ''/);
-		assert.match(launchScript, /'--no-extensions' '-e' '.*\/tools\/subagent-done\.ts'/);
+		assert.match(launchScript, /'--no-extensions' '-e' '.*[\\/]tools[\\/]subagent-done\.ts'/);
 		assert.equal(launchScript.match(/'--tools' '([^']+)'/)?.[1], "read,grep,caller_ping,subagent_done");
 		assert.equal(
 			launchScript.match(/'--exclude-tools' '([^']+)'/)?.[1],
 			"subagent,subagent_resume,subagent_kill,grep,set_tab_title",
 		);
-		assert.match(launchScript, new RegExp(`'--skill' '${skillFile.replace(/'/g, "'\\''")}'`));
+		assert.match(launchScript, new RegExp(`'--skill' '${escapeRegExp(skillFile.replace(/'/g, "'\\''"))}'`));
 
 		const taskArtifact = readFileSync(extractTaskArtifactPath(launchScript), "utf8");
 		assert.match(taskArtifact, /<skill name="review">/);
@@ -601,7 +632,11 @@ describe("Herdr interactive launch parity", () => {
 } >> "${childLogFile}"
 `,
 		);
-		process.env.PI_SUBAGENT_PI_COMMAND = fakePi;
+		// A background child is spawned directly rather than through the staged script, so
+		// on Windows nothing honours the shebang: run it through the POSIX interpreter.
+		// Quoted because the interpreter usually lives under "Program Files".
+		process.env.PI_SUBAGENT_PI_COMMAND =
+			process.platform === "win32" ? `"${posixShellPath()}" "${fakePi}"` : fakePi;
 
 		const running = await launchBackgroundSubagent(
 			{
@@ -631,8 +666,11 @@ describe("Herdr interactive launch parity", () => {
 		assert.equal(running.reportContextUsage, false);
 		assert.equal(readSubagentLaunchMetadataForTest(running.sessionFile)?.reportContextUsage, false);
 		const expectedChildCwd = realpathSync(childCwd);
-		const escapedChildCwd = expectedChildCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		assert.match(childLog, new RegExp(`PWD=${escapedChildCwd}`));
+		// $PWD comes from the shell that ran the child, and its spelling is not portable:
+		// Git-bash reports a Windows temp path as /tmp/..., not /c/Users/.../Temp/....
+		// The identifying part is the unique test directory and the workspace under it.
+		const pwdTail = expectedChildCwd.replace(/\\/g, "/").split("/").slice(-2).join("/");
+		assert.match(childLog, new RegExp(`PWD=.*${escapeRegExp(pwdTail)}\n`));
 		assert.match(childLog, /CUSTOM_ENV=from-background-agent/);
 		assert.match(childLog, /SURFACE=\n/);
 		assert.match(childLog, /--no-approve/);
