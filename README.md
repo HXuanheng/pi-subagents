@@ -441,6 +441,35 @@ allowed-models: openai/gpt-5.5:low, nahcrof/glm-5.1:off, anthropic/claude-opus-4
 
 `model` is the default and is always allowed. `allowed-models` lists the other models Pi may use for this agent, so you do not need to repeat `model`. The `:thinking` suffix is optional: `provider/model:low` allows only that thinking level, while `provider/model` allows the model with whatever thinking level Pi resolves. If `allow-model-override: false`, Pi ignores launch-time and resume-time model choices as usual.
 
+### Model policy file
+
+A model menu is only a list of names. The parent has to pick from it without knowing what any
+entry costs or how well it codes. `models-policy.json` in your Pi agent config root
+(`PI_CODING_AGENT_DIR`, otherwise `~/.pi/agent`) attaches that information to the refs the roster
+already shows:
+
+```json
+{
+  "models": {
+    "anthropic/claude-sonnet-5": { "cost": 4.6, "coding": 70.8, "note": "default implementer" },
+    "anthropic/claude-haiku-4-5": { "cost": 1.0, "coding": 42.0, "note": "cheap scout; weak on multi-file work" }
+  }
+}
+```
+
+The roster then renders `default_model: anthropic/claude-sonnet-5 (cost 4.6, coding 70.8) — default
+implementer` instead of the bare ref. Every field is optional; an entry with only a `note` renders
+only the note. A key may carry a `:thinking` suffix, and a bare `provider/model` key annotates every
+thinking level of that model. The file is hand-maintained — Pi never fetches or updates it.
+
+The file itself is optional, and so is its correctness. A missing file, unreadable file, invalid
+JSON, a wrong top-level shape, or a single entry with a bad field type all produce no annotations at
+all, and the roster renders exactly as it does without the file. Validation is deliberately
+all-or-nothing: a partly applied policy would annotate some refs and leave others bare, which reads
+as "this model has no data" rather than "your file has a typo". A ref the policy does not mention
+renders as a plain ref, never with a placeholder or a guessed score. Editing the file changes the
+roster on the next refresh.
+
 ## Ambient awareness
 
 Ambient awareness is the quiet note Pi gives the parent model about available agents.

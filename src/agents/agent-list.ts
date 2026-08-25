@@ -1,6 +1,7 @@
 import type { ResolvedAgentDefinition } from "./definitions.ts";
 import { getEffectiveAgentDefinitions } from "./definitions.ts";
-import { buildModelRef, parseAllowedModels } from "./model-refs.ts";
+import { buildModelRef, parseAllowedModels, splitModelRef } from "./model-refs.ts";
+import { loadModelPolicy, type ModelPolicy } from "./model-policy.ts";
 import { formatTimeoutSeconds } from "../runtime/timeout-budget.ts";
 import {
 	getContextReminderThresholds,
@@ -104,18 +105,36 @@ function getCompletion(entry: AgentListEntry): "exits_automatically" | "human_or
 	return entry.mode === "background" ? "exits_automatically" : "human_or_agent_must_finish";
 }
 
-function renderDefaultModelLine(entry: AgentListEntry): string | undefined {
-	const ref = buildModelRef(entry.model, entry.thinking);
-	return ref ? `  default_model: ${ref}` : undefined;
+/**
+ * Renders the cost/capability annotation for one model ref from the optional
+ * models-policy.json file, keyed by the ref's model part (without a
+ * `:thinking` suffix). Returns "" for a ref the policy does not cover, so an
+ * unknown ref renders with no noise and no fake score.
+ */
+function formatModelAnnotation(ref: string, policy: ModelPolicy): string {
+	const info = policy[splitModelRef(ref).model] ?? policy[ref];
+	if (!info) return "";
+	const scoreParts = [
+		info.cost !== undefined ? `cost ${info.cost}` : undefined,
+		info.coding !== undefined ? `coding ${info.coding}` : undefined,
+	].filter((part): part is string => part !== undefined);
+	const scores = scoreParts.length > 0 ? ` (${scoreParts.join(", ")})` : "";
+	const note = info.note ? ` — ${info.note}` : "";
+	return `${scores}${note}`;
 }
 
-function renderModelsLine(entry: AgentListEntry): string | undefined {
+function renderDefaultModelLine(entry: AgentListEntry, policy: ModelPolicy): string | undefined {
+	const ref = buildModelRef(entry.model, entry.thinking);
+	return ref ? `  default_model: ${ref}${formatModelAnnotation(ref, policy)}` : undefined;
+}
+
+function renderModelsLine(entry: AgentListEntry, policy: ModelPolicy): string | undefined {
 	if (entry.allowModelOverride === false) return undefined;
 	const allowed = parseAllowedModels(entry.allowedModels);
 	if (allowed.length === 0) return "  models: any model ref";
 	const defaultModel = buildModelRef(entry.model, entry.thinking);
 	const choices = [...new Set([defaultModel, ...allowed].filter((ref): ref is string => !!ref))];
-	return `  models: ${choices.join(" | ")}`;
+	return `  models: ${choices.map((ref) => `${ref}${formatModelAnnotation(ref, policy)}`).join(" | ")}`;
 }
 
 function renderSpawningLines(entry: AgentListEntry): string[] {
@@ -152,6 +171,7 @@ function renderLimitLines(entry: AgentListEntry): string[] {
 }
 
 export function renderAgentListReminder(entries: AgentListEntry[]): string {
+	const policy = loadModelPolicy();
 	const hasModelInfo = entries.some(
 		(entry) => buildModelRef(entry.model, entry.thinking) || entry.allowModelOverride !== false,
 	);
@@ -172,8 +192,8 @@ export function renderAgentListReminder(entries: AgentListEntry[]): string {
 						`  runs_as: ${getRunsAs(entry)}`,
 						`  context: ${getContext(entry)}`,
 						`  completion: ${getCompletion(entry)}`,
-						renderDefaultModelLine(entry),
-						renderModelsLine(entry),
+						renderDefaultModelLine(entry, policy),
+						renderModelsLine(entry, policy),
 						...renderSpawningLines(entry),
 						...renderLimitLines(entry),
 					]
@@ -226,9 +246,13 @@ export function renderAgentListReminder(entries: AgentListEntry[]): string {
 	return `<system-reminder>\n${body}\n</system-reminder>`;
 }
 
+// The policy file is part of what the roster renders, so it belongs in the
+// signature: editing models-policy.json alone must still refresh the parent's
+// roster instead of being suppressed as an unchanged agent list.
 export function getAgentListSignature(entries: AgentListEntry[]): string {
-	return JSON.stringify(
-		entries.map((entry) => ({
+	return JSON.stringify({
+		policy: loadModelPolicy(),
+		entries: entries.map((entry) => ({
 			name: entry.name,
 			source: entry.source,
 			mode: entry.mode,
@@ -249,5 +273,5 @@ export function getAgentListSignature(entries: AgentListEntry[]): string {
 			reportContextUsage: entry.reportContextUsage,
 			visibleTo: entry.visibleTo,
 		})),
-	);
+	});
 }
