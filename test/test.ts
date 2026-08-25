@@ -65,3 +65,4 @@ import "./mux/zellij-owned-placement.test.ts";
 import "./agents/roster-filtering.test.ts";
 import "./agents/roster-limit-fields.test.ts";
 import "./agents/model-policy.test.ts";
+import "./trace/aggregate.test.ts";

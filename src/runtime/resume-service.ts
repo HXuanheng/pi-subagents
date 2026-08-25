@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAgentDefaults as loadAgentDefaultsFromDefinitions } from "../agents/definitions.ts";
+import { traceSubagentLaunch } from "../launch/trace.ts";
 import { assertModelAllowed, buildModelRef, splitModelRef } from "../agents/model-refs.ts";
 import { getArtifactStorageRoot } from "../artifact-storage.ts";
 import { buildAppendSystemInheritancePlan } from "../launch/append-system.ts";
@@ -418,6 +419,16 @@ async function resumeSubagentSessionWithoutWidth(
 	resumeEnvVars.PI_ARTIFACT_PROJECT_ROOT = getArtifactStorageRoot();
 
 	const id = Math.random().toString(16).slice(2, 10);
+	// A resume builds its RunningSubagent here rather than through
+	// launchInteractiveSubagent, so it emits no interactive.prepared event. Without
+	// this marker a resumed run is indistinguishable from a fresh launch in the trace log.
+	traceSubagentLaunch("resume.started", {
+		id,
+		name,
+		agent: resumedAgent,
+		mode: metadata.mode,
+		sessionFile,
+	});
 	const running: RunningSubagent = {
 		id,
 		name,
