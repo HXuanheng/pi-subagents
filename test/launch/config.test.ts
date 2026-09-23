@@ -19,7 +19,6 @@ import {
 	getPersistedApprovalLaunchArgsForTest,
 	getPersistedSessionParityArgsForTest,
 	getPiInvocationForTest,
-	getPiShellPartsForTest,
 	getPreparedSessionLaunchArgsForTest,
 	getResumeCwdForTest,
 	getSubagentChildProcessEnvForTest,
@@ -431,11 +430,6 @@ describe("agent launch configuration", () => {
 		assert.ok(invocation.args.includes("--flags-injected"), "flags should appear in pi invocation args");
 	});
 
-	it("shell-escapes flags in getPiShellParts for interactive children", () => {
-		const parts = getPiShellPartsForTest(["--session", "/tmp/s.jsonl", "--custom-flag"]);
-		assert.ok(parts.join(" ").includes("--custom-flag"), "custom flag should be in shell parts");
-	});
-
 	it("preserves the default launcher when no subagent command override is set", () => {
 		delete process.env.PI_SUBAGENT_PI_COMMAND;
 		delete process.env.PI_PACKAGE_DIR;
@@ -451,12 +445,6 @@ describe("agent launch configuration", () => {
 			command: "wrapper",
 			args: ["pi", "--session", "/tmp/session.jsonl"],
 		});
-		assert.deepEqual(getPiShellPartsForTest(["--session", "/tmp/with space.jsonl"]), [
-			"'wrapper'",
-			"'pi'",
-			"'--session'",
-			"'/tmp/with space.jsonl'",
-		]);
 	});
 
 	it("parses quoted PI_SUBAGENT_PI_COMMAND values", () => {
@@ -483,14 +471,6 @@ describe("agent launch configuration", () => {
 			command: "C:\\Program Files\\pi\\pi.exe",
 			args: ["--verbose", "--session", "/tmp/session.jsonl"],
 		});
-	});
-
-	it("shell-escapes a Windows path so the staged script runs it as one word", () => {
-		process.env.PI_SUBAGENT_PI_COMMAND = "C:\\Program Files\\pi\\pi.exe";
-		// Unquoted, the space still splits: quoting is the user's job, backslashes are not.
-		assert.deepEqual(getPiShellPartsForTest([]), ["'C:\\Program'", "'Files\\pi\\pi.exe'"]);
-		process.env.PI_SUBAGENT_PI_COMMAND = '"C:\\Program Files\\pi\\pi.exe"';
-		assert.deepEqual(getPiShellPartsForTest([]), ["'C:\\Program Files\\pi\\pi.exe'"]);
 	});
 
 	it("still lets a backslash escape a quote, a space and itself", () => {

@@ -3,6 +3,7 @@ import { getEffectiveAgentDefinitions } from "./definitions.ts";
 import { buildModelRef, parseAllowedModels, splitModelRef } from "./model-refs.ts";
 import { loadModelPolicy, type ModelPolicy } from "./model-policy.ts";
 import { formatTimeoutSeconds } from "../runtime/timeout-budget.ts";
+import { resolveVerifierCandidateCount } from "../vf/criteria.ts";
 import {
 	getContextReminderThresholds,
 	parseContextWarnStep,
@@ -28,6 +29,10 @@ export interface AgentListEntry {
 	spawnWidth?: number;
 	timeout?: number;
 	idleTimeout?: number;
+	/** `llm-as-a-verifier` marker: launches fan out to ranked candidates. */
+	llmAsVerifier?: boolean;
+	/** Explicit `llm-as-a-verifier-candidates` count, when set. */
+	llmAsVerifierCandidates?: number;
 	contextWarnThreshold?: string;
 	contextWarnStep?: string;
 	reportContextUsage?: boolean;
@@ -75,6 +80,10 @@ export function getAgentListEntries(
 			...(agent.spawnWidth !== undefined ? { spawnWidth: agent.spawnWidth } : {}),
 			...(agent.timeout !== undefined ? { timeout: agent.timeout } : {}),
 			...(agent.idleTimeout !== undefined ? { idleTimeout: agent.idleTimeout } : {}),
+			...(agent.llmAsVerifier !== undefined ? { llmAsVerifier: agent.llmAsVerifier } : {}),
+			...(agent.llmAsVerifierCandidates !== undefined
+				? { llmAsVerifierCandidates: agent.llmAsVerifierCandidates }
+				: {}),
 			...(agent.contextWarnThreshold !== undefined ? { contextWarnThreshold: agent.contextWarnThreshold } : {}),
 			...(agent.contextWarnStep !== undefined ? { contextWarnStep: agent.contextWarnStep } : {}),
 			...(agent.reportContextUsage !== undefined ? { reportContextUsage: agent.reportContextUsage } : {}),
@@ -160,6 +169,18 @@ function getContextWarnPercent(entry: AgentListEntry): number | undefined {
 	return getContextReminderThresholds(percent, step).length === 3 ? percent : undefined;
 }
 
+function renderVerifiedFanOutLine(entry: AgentListEntry): string | undefined {
+	if (entry.llmAsVerifier !== true) return undefined;
+	// Resolved N: explicit field > PI_SUBAGENT_LLM_VERIFIER_CANDIDATES > 3.
+	// The roster is advisory, so a bad env value surfaces inline here; the
+	// same error fails the actual launch closed at pre-flight.
+	try {
+		return `  llm-as-a-verifier: true (${resolveVerifierCandidateCount(entry.llmAsVerifierCandidates)} attempts)`;
+	} catch (error) {
+		return `  llm-as-a-verifier: true (${(error as Error).message})`;
+	}
+}
+
 function renderLimitLines(entry: AgentListEntry): string[] {
 	const contextWarnPercent = getContextWarnPercent(entry);
 	return [
@@ -182,6 +203,7 @@ export function renderAgentListReminder(entries: AgentListEntry[]): string {
 		(entry) => entry.sessionMode === "fork" && getContextWarnPercent(entry) !== undefined,
 	);
 	const hasHiddenContextReport = entries.some((entry) => entry.reportContextUsage === false);
+	const hasVerifiedFanOut = entries.some((entry) => entry.llmAsVerifier === true);
 	const agentLines =
 		entries.length === 0
 			? ["No agents are spawnable in this session."]
@@ -195,6 +217,7 @@ export function renderAgentListReminder(entries: AgentListEntry[]): string {
 						renderDefaultModelLine(entry, policy),
 						renderModelsLine(entry, policy),
 						...renderSpawningLines(entry),
+						renderVerifiedFanOutLine(entry),
 						...renderLimitLines(entry),
 					]
 						.filter(Boolean)
@@ -240,6 +263,11 @@ export function renderAgentListReminder(entries: AgentListEntry[]): string {
 					"- `report-context-usage: false` hides the token counts in the result. When this agent stops early, the result still reports it.",
 				]
 			: []),
+		...(hasVerifiedFanOut
+			? [
+					"- `llm-as-a-verifier: true` means one launch runs several independent attempts of the task and an LLM verifier picks the best one; you receive exactly one result. Wait for that result before you launch this agent again. It needs a clean Git tree — the launch fails immediately otherwise.",
+				]
+			: []),
 		"- If the user names an agent that is not listed, say it was not found and stop; do not suggest a different listed agent.",
 		"</subagent-rules>",
 	].join("\n");
@@ -269,6 +297,8 @@ export function getAgentListSignature(entries: AgentListEntry[]): string {
 			spawnWidth: entry.spawnWidth,
 			timeout: entry.timeout,
 			idleTimeout: entry.idleTimeout,
+			llmAsVerifier: entry.llmAsVerifier,
+			llmAsVerifierCandidates: entry.llmAsVerifierCandidates,
 			contextWarn: entry.contextWarnThreshold !== undefined ? getContextWarnPercent(entry) ?? null : undefined,
 			reportContextUsage: entry.reportContextUsage,
 			visibleTo: entry.visibleTo,
