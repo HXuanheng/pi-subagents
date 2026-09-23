@@ -464,7 +464,7 @@ async function resumeSubagentSessionWithoutWidth(
 		]);
 		const child = spawn(invocation.command, invocation.args, {
 			...(resumeCwd ? { cwd: resumeCwd } : {}),
-			detached: true,
+			detached: process.platform !== "win32", // win32: DETACHED_PROCESS + CREATE_NO_WINDOW conflict leaves a stray console
 			windowsHide: true,
 			stdio:
 				running.parentClosePolicy === "continue"
